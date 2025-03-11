@@ -1,4 +1,4 @@
-# Microsoft Entra ID PowerShell FIDO2 Provisioning Script
+# Microsoft Entra ID PowerShell FIDO2 Provisioning Script for OneSpan FIDO2 FX Series Hardware Authenticators
 
 This PowerShell script allows administrators to pre-provision **OneSpan FX7 FIDO2 security keys** in **Microsoft Entra ID**, either for a **single user** or in **bulk** via CSV. It registers FIDO2 passkeys on behalf of users using **Microsoft Graph** and the **DSInternals.Passkeys** module.
 
