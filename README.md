@@ -2,6 +2,10 @@
 
 This PowerShell script allows administrators to pre-provision **OneSpan FX7 FIDO2 security keys** in **Microsoft Entra ID**, either for a **single user** or in **bulk** via CSV. It registers FIDO2 passkeys on behalf of users using **Microsoft Graph** and the **DSInternals.Passkeys** module.
 
+### Further documentation can be found at 
+- https://docs.onespan.com/docs/hwrd-fx7-microsoft-entraid-registering-a-passkey-in-entraid-using-powershell
+- https://docs.onespan.com/docs/hwrd-fx7-microsoft-entraid-registering-multiple-passkeys-in-entraid-using-powershell-and-csv
+
 ---
 
 ## 🔧 Features
