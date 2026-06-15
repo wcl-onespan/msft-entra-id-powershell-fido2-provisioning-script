@@ -44,6 +44,25 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
         # NOTE: Mock Get-Module LAST. Pester calls Get-Module internally when setting
         # up mocks for other commands (to discover which module owns them). Mocking it
         # first causes "Could not find Command <X>" for any subsequent Mock call.
+        # ── Stub external commands FIRST — Pester 5 can only mock commands that exist ──
+        # CI runners do not have Microsoft.Graph or DSInternals.Passkeys installed, so these
+        # global stubs must be defined before any Mock call that targets them.
+        if (-not (Get-Command Connect-MgGraph -ErrorAction SilentlyContinue)) {
+            function global:Connect-MgGraph { param([string[]]$Scopes, [string]$TenantId) }
+        }
+        if (-not (Get-Command Invoke-MgGraphRequest -ErrorAction SilentlyContinue)) {
+            function global:Invoke-MgGraphRequest { param([string]$Method, [string]$Uri, $Body, [string]$ContentType, [string]$OutputType) }
+        }
+        if (-not (Get-Command Get-MgBetaUserAuthenticationFido2Method -ErrorAction SilentlyContinue)) {
+            function global:Get-MgBetaUserAuthenticationFido2Method { param([string]$UserId) }
+        }
+        if (-not (Get-Command Get-EntraPasskeyRegistrationOptions -ErrorAction SilentlyContinue)) {
+            function global:Get-EntraPasskeyRegistrationOptions { param([string]$UserId) }
+        }
+        if (-not (Get-Command New-Passkey -ErrorAction SilentlyContinue)) {
+            function global:New-Passkey { param() }
+        }
+
         Mock Install-Module  { }
         Mock Connect-MgGraph { }
         Mock Invoke-MgGraphRequest {
@@ -62,31 +81,6 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
         # Get-Module mocked last so the above mocks can resolve their source modules normally.
         Mock Get-Module {
             [PSCustomObject]@{ Name = $Name; Version = [version]'9.9.9' }
-        }
-
-        # Stub Microsoft.Graph commands if the module is not installed.
-        # The PowerShell Extension terminal (pwsh / PS 7) uses a different module path from
-        # Windows PowerShell 5.1, so Microsoft.Graph may not be present there.
-        # Pester 5 can only Mock commands that already exist; these stubs ensure the mocks
-        # above succeed regardless of which PowerShell host runs the tests.
-        if (-not (Get-Command Connect-MgGraph -ErrorAction SilentlyContinue)) {
-            function global:Connect-MgGraph { param([string[]]$Scopes, [string]$TenantId) }
-        }
-        if (-not (Get-Command Invoke-MgGraphRequest -ErrorAction SilentlyContinue)) {
-            function global:Invoke-MgGraphRequest { param([string]$Method, [string]$Uri, $Body, [string]$ContentType, [string]$OutputType) }
-        }
-        if (-not (Get-Command Get-MgBetaUserAuthenticationFido2Method -ErrorAction SilentlyContinue)) {
-            function global:Get-MgBetaUserAuthenticationFido2Method { param([string]$UserId) }
-        }
-
-        # Stub DSInternals.Passkeys commands if the module is not installed.
-        # Pester can only mock commands that exist; defining stubs here lets every
-        # Context block mock them without requiring the real module to be present.
-        if (-not (Get-Command Get-EntraPasskeyRegistrationOptions -ErrorAction SilentlyContinue)) {
-            function global:Get-EntraPasskeyRegistrationOptions { param([string]$UserId) }
-        }
-        if (-not (Get-Command New-Passkey -ErrorAction SilentlyContinue)) {
-            function global:New-Passkey { param() }
         }
 
         # Replicate the GitHub Actions $ErrorActionPreference = 'Stop' environment.
