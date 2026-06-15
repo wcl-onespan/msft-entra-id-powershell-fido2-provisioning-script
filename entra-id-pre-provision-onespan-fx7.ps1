@@ -65,7 +65,7 @@
     Company:      OneSpan
     License:      MIT
     Version:      1.1.0
-    Changelog:    See CHANGELOG.md
+    Changelog:    CHANGELOG.md — see the [1.1.0] entry for full details
     Dependencies: Microsoft.Graph.Identity.SignIns (MinimumVersion 2.26.0)
                   DSInternals.Passkeys             (MinimumVersion 3.1.0)
 

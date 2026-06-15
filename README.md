@@ -59,6 +59,18 @@ user2@domain.com,FX7-87654321
 .\entra-id-pre-provision-onespan-fx7.ps1 -TenantId "yourtenant.onmicrosoft.com" -CsvFilePath ".\users.csv"
 ```
 
+### 🔹 Unattended / automation mode
+
+```powershell
+.\entra-id-pre-provision-onespan-fx7.ps1 -TenantId "yourtenant.onmicrosoft.com" -CsvFilePath ".\users.csv" -Force
+```
+
+### 🔹 Log output to a file
+
+```powershell
+.\entra-id-pre-provision-onespan-fx7.ps1 -TenantId "yourtenant.onmicrosoft.com" -CsvFilePath ".\users.csv" -LogPath ".\provisioning.log" -Force
+```
+
 You can also run the script interactively and it will prompt for missing values.
 
 ---
@@ -101,7 +113,7 @@ Install-Module Pester -MinimumVersion 5.0.0 -Scope CurrentUser -Force
 Invoke-Pester .\tests\entra-id-pre-provision-onespan-fx7.Tests.ps1 -Output Detailed
 ```
 
-All 98 tests should pass on both **Windows PowerShell 5.1** and **PowerShell 7+**.
+All **113 tests** should pass on both **Windows PowerShell 5.1** and **PowerShell 7+**.
 
 > **Module-independence:** The test suite does **not** require `Microsoft.Graph` or `DSInternals.Passkeys` to be installed. All external commands (`Connect-MgGraph`, `Invoke-MgGraphRequest`, `Get-MgBetaUserAuthenticationFido2Method`, `Get-EntraPasskeyRegistrationOptions`, `New-Passkey`) are stubbed with `function global:` definitions in `BeforeAll` if they are absent, then overridden per-test with Pester mocks. This allows the suite to run in any environment — including CI runners, the VS Code PowerShell Extension terminal (which uses `pwsh`), and machines that only have Pester installed.
 

@@ -8,8 +8,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+---
+
+## [1.1.0] - 2026-06-15
+
 ### Added
 
+- **`Write-Log`** — centralised logging function routing to `Write-Host`, `Write-Error`, `Write-Warning`, or `Write-Verbose` based on a `Level` parameter (`Host`, `Error`, `Warn`, `Verbose`). Optionally appends timestamped entries to a log file when `$script:LogPath` is set.
+- **`Confirm-Action`** — interactive confirmation gate before any credential ceremony. Skipped automatically when `-Force` or `-DryRun` is supplied; throws on user rejection.
+- **`Main`** function — wraps the entire execution body so the script can be dot-sourced (by Pester or for module reuse) without immediately running against a live tenant.
+- **Dual entry-point guard** — `Main` is called only when the script is invoked directly (`$MyInvocation.InvocationName -ne '.'`) and `$env:TEST_MODE` is not set, preventing accidental execution during dot-source.
+- **`-LogPath`** parameter — optional path to a log file; `Write-Log` appends a timestamped entry for every message when set.
+- **`-DryRun`** switch — suppresses the confirmation prompt and emits a warning instead; useful for validating connectivity and policy checks without modifying any credentials.
+- **`-Force`** switch — suppresses the interactive confirmation prompt; intended for unattended automation.
+- **`$script:PSVersionOverride`** — script-level variable for unit-test isolation; set to `5` or `7` in a `BeforeEach` to force the PS5/PS7 branch of `Ensure-Module` without running under that version.
+- **`$script:IsWindowsOverride`** — script-level variable for unit-test isolation; set to `$false` in a `BeforeEach` to test the non-Windows guard in `Main` without running on Linux or macOS.
 - **`Get-FidoMdsAAGUIDs`** — queries the FIDO Alliance MDS3 metadata service to enumerate all AAGUIDs registered under a vendor name (default `OneSpan`). Used during `BadRequest` diagnostics to verify whether the connected key is a recognised device.
 - **`ConvertTo-Base64Url`** — helper that converts either a `byte[]` or an already-encoded string to base64url (URL-safe alphabet, no padding). Handles the representation change introduced in DSInternals.Passkeys 3.2.0, where response properties changed from `byte[]` to pre-encoded strings.
 - **`Assert-Fido2PolicyEnabled`** — reads the tenant's FIDO2 authentication method policy via the Graph Beta API and:
@@ -17,19 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - Performs a preflight key-restriction check: if key restrictions are enforced, verifies the connected key's AAGUID against the allow/block list and fails fast with a clear error before attempting registration.
   - Stores `$script:PolicyKeyRestrictions` for use in `BadRequest` diagnostics downstream.
 - **`Process-User`** — encapsulates per-user orchestration: normalises the serial number (strips hyphens), builds the canonical `DisplayName`, checks whether the key is already registered (skip-and-verify path), and drives `Create-and-Register-Passkey` followed by `Verify-Registration`.
-- **Pester test suite** (`tests/entra-id-pre-provision-onespan-fx7.Tests.ps1`) — 98 tests, 99.5 % line coverage, covering:
-  - All functions with mocked external dependencies (no real Graph calls or hardware required)
-  - `ConvertTo-Base64Url` byte encoding, URL-safe alphabet, and passthrough behaviour
-  - `Ensure-Module` install/skip logic across four version scenarios
-  - `Connect-ToMsGraph` scope, tenant-ID assertions, and connection-failure propagation
-  - `Get-FidoMdsAAGUIDs` JWT parsing, vendor filtering, and network-failure fallback
-  - `Assert-Fido2PolicyEnabled` self-service check, key-restriction enforcement (allow/block list), and permissions-error resilience
-  - `Create-and-Register-Passkey` POST body structure, byte-array transport, URL encoding, base64url fields, AAGUID extraction, AAGUID mismatch warning, null `AuthenticatorData` recovery, `ErrorDetails` propagation, user-cancellation, `BadRequest` diagnostics (MDS confirmed / unknown / unreachable), and option-request failure
-  - `Verify-Registration` success, not-found, and Graph error paths
-  - `Process-User` already-registered skip path, new-registration path, serial normalisation, and key-not-yet-registered diagnostic
-  - Main script body — CSV mode (two-row, single-row, per-row error recovery, empty-CSV rejection) and interactive prompt mode (TenantId, CsvFilePath, UPN, SerialID)
-  - Data-alignment checks: serial normalisation, `DisplayName` constraints, Graph JSON schema, OneSpan FX7 AAGUID values, UPN URL encoding, and CSV column requirements
-  - Module-independence: Microsoft.Graph and DSInternals.Passkeys commands are stubbed with `function global:` definitions when the modules are not installed, so the suite runs on any PowerShell host (PS 5.1, PS 7, CI runners)
+- **Pester test suite** (`tests/entra-id-pre-provision-onespan-fx7.Tests.ps1`) — 113 tests covering all functions with mocked external dependencies (no real Graph calls or hardware required), plus CI-verified on both Windows PowerShell 5.1 and PowerShell 7.
 - **GitHub Actions CI workflow** (`.github/workflows/pester.yml`) — runs on every push and pull request to `main` against both **Windows PowerShell 5.1** and **PowerShell 7** using a matrix strategy:
   - Installs Pester 5 from PSGallery
   - Executes the full test suite with JaCoCo code coverage scoped to `entra-id-pre-provision-onespan-fx7.ps1`
@@ -40,6 +41,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **`Ensure-Module`** now uses `Install-PSResource` on PowerShell 7+ (the modern replacement for the deprecated `Install-Module`) and falls back to `Install-Module` on Windows PowerShell 5.1. When a `MinimumVersion` is specified, the NuGet range syntax `[version,)` is passed to `Install-PSResource`.
 - **Registration no longer uses `Register-EntraPasskey`** (DSInternals.Passkeys). In version 3.2.0 that cmdlet's `ToString()` serialisation changed to emit raw OS credential JSON, omitting the `{displayName, publicKeyCredential}` wrapper required by the Graph API. The function now manually constructs the POST body and calls `Invoke-MgGraphRequest` directly, bypassing the broken serialiser entirely.
 - **POST body sent as UTF-8 bytes** (`byte[]`) rather than a string. Some versions of the Microsoft Graph SDK re-serialise a string body as a JSON string literal (double-encoding it). Sending bytes bypasses all SDK serialisation logic and guarantees the server receives a JSON object at the root.
 - **UPN URL-encoded** in the Graph API endpoint path using `[uri]::EscapeDataString()`, ensuring addresses with `@` and other special characters are correctly escaped (`user%40domain.com`).
@@ -57,7 +59,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Empty CSV** (`Import-Csv` returns `$null`) now throws after writing a diagnostic error instead of calling `exit 1`, keeping behaviour consistent with the rest of the script and allowing the condition to be tested.
 - **`Write-Error` calls that are non-fatal** (in `Verify-Registration` and the CSV batch loop) now carry `-ErrorAction Continue` so they do not terminate under `$ErrorActionPreference = 'Stop'` (the GitHub Actions default for `powershell` and `pwsh` steps).
 - **`#Requires -Version 5.1`** added at the top of the script; PowerShell enforces this before any parsing, giving a clean version error on unsupported hosts.
-- **Windows-only guard** added before `Ensure-Module`: on PowerShell 6+ non-Windows hosts the script throws immediately with a message pointing to the `webauthn.dll` dependency, rather than failing cryptically inside `New-Passkey`.
+- **Windows-only guard** moved inside `Main` and made testable via `$script:IsWindowsOverride`; on PowerShell 6+ non-Windows hosts the script throws immediately with a message pointing to the `webauthn.dll` dependency.
 
 ---
 
