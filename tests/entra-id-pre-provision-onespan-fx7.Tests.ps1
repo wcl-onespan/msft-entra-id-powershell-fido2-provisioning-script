@@ -163,22 +163,26 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
             }
         }
 
-        Context 'Module not installed' {
+        Context 'Module not installed, PS5 path (uses Install-Module)' {
             BeforeEach {
                 Mock Get-Module { $null }
                 Mock Install-Module { }
+                $script:PSVersionOverride = 5
             }
+            AfterEach { $script:PSVersionOverride = $null }
             It 'Calls Install-Module' {
                 Ensure-Module -ModuleName 'DSInternals.Passkeys' -MinimumVersion '3.1.0'
                 Should -Invoke Install-Module -Times 1
             }
         }
 
-        Context 'Module installed below minimum version' {
+        Context 'Module installed below minimum version, PS5 path (uses Install-Module)' {
             BeforeEach {
                 Mock Get-Module { [PSCustomObject]@{ Name = $Name; Version = [version]'2.0.0' } }
                 Mock Install-Module { }
+                $script:PSVersionOverride = 5
             }
+            AfterEach { $script:PSVersionOverride = $null }
             It 'Calls Install-Module to upgrade' {
                 Ensure-Module -ModuleName 'DSInternals.Passkeys' -MinimumVersion '3.1.0'
                 Should -Invoke Install-Module -Times 1
