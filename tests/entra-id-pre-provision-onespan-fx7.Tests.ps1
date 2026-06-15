@@ -211,6 +211,13 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
                 }
                 Should -Invoke Install-Module -Times 0
             }
+            It 'Calls Install-PSResource without a version constraint when MinimumVersion is omitted' {
+                Ensure-Module -ModuleName 'AnyModule'
+                Should -Invoke Install-PSResource -Times 1 -ParameterFilter {
+                    $Name -eq 'AnyModule' -and -not $Version
+                }
+                Should -Invoke Install-Module -Times 0
+            }
         }
     }
 
@@ -253,6 +260,12 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
             $script:LogPath = $null
             Mock Add-Content { throw 'Must not write to log' }
             { Write-Log -Message 'no file' -Level Host } | Should -Not -Throw
+        }
+
+        It 'Calls Write-Verbose for the default (Verbose) level' {
+            Mock Write-Verbose { }
+            Write-Log -Message 'verbose msg' -Level Verbose
+            Should -Invoke Write-Verbose -Times 1 -ParameterFilter { $Message -eq 'verbose msg' }
         }
     }
 
@@ -1319,6 +1332,41 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
             $threw | Should -Be $false -Because 'script should complete when UPN and SerialID are supplied via Read-Host'
             $script:promptCallCount | Should -BeGreaterOrEqual 3 -Because 'all three Read-Host prompts must fire'
             $script:promptCallCount = $null
+        }
+    }
+
+    # ══════════════════════════════════════════════════════════════════════════
+    Describe 'Main – Windows-only guard' {
+
+        It 'Throws when run on a non-Windows system (simulated via IsWindowsOverride)' {
+            $script:IsWindowsOverride = $false
+            try {
+                { Main -TenantId 'test.onmicrosoft.com' -UPN 'x@test.com' -SerialID '000000' -Force } |
+                    Should -Throw '*Windows*'
+            } finally {
+                $script:IsWindowsOverride = $null
+            }
+        }
+    }
+
+    # ══════════════════════════════════════════════════════════════════════════
+    Describe 'Entry-point guard' {
+        # Invokes the script with & (not dot-source) so InvocationName != '.' and
+        # the entry-point guard fires, calling Main. All external deps are mocked.
+
+        It 'Calls Main when script is executed directly with TEST_MODE unset' {
+            Mock Get-MgBetaUserAuthenticationFido2Method {
+                [PSCustomObject]@{ DisplayName = 'OneSpan FX7 888888' }
+            }
+            Mock Write-Host { }
+            $prev = $env:TEST_MODE
+            try {
+                $env:TEST_MODE = $null
+                { & $script:ScriptPath -TenantId 'test.onmicrosoft.com' -UPN 'guard@test.com' -SerialID '888888' -Force } |
+                    Should -Not -Throw
+            } finally {
+                $env:TEST_MODE = $prev
+            }
         }
     }
 }

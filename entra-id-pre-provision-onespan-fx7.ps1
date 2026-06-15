@@ -102,6 +102,10 @@ param (
 # run under that PS version.
 $script:PSVersionOverride = $null
 
+# IsWindows override for unit-test isolation. Set $script:IsWindowsOverride = $false in a
+# BeforeEach block to test the non-Windows guard in Main without running on Linux or macOS.
+$script:IsWindowsOverride = $null
+
 # Centralised logging. Routes to the appropriate output stream and optionally appends a
 # timestamped line to a log file whenever $script:LogPath is set (populated inside Main).
 function Write-Log {
@@ -494,7 +498,14 @@ function Main {
     # DSInternals.Passkeys uses the Windows WebAuthn API (webauthn.dll), which is only
     # available on Windows. Fail fast with a clear message rather than a cryptic error
     # inside New-Passkey. PS 5.1 is always Windows so no check is needed there.
-    if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+    $_isWindows = if ($null -ne $script:IsWindowsOverride) {
+        $script:IsWindowsOverride
+    } elseif ($PSVersionTable.PSVersion.Major -lt 6) {
+        $true  # PS 5.1 is always Windows
+    } else {
+        $IsWindows
+    }
+    if (-not $_isWindows) {
         throw "This script requires Windows. DSInternals.Passkeys relies on the Windows WebAuthn API (webauthn.dll), which is not available on Linux or macOS."
     }
 
