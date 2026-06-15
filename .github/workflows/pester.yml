@@ -1,0 +1,136 @@
+name: Pester Tests & Coverage
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+# Permissions required for test-reporter (checks write) and PR summary (pull-requests write)
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  pester:
+    name: Run Pester Tests (${{ matrix.ps_label }})
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false   # let both versions finish even if one fails
+      matrix:
+        include:
+          - shell: powershell   # Windows PowerShell 5.1
+            ps_label: PS5
+          - shell: pwsh         # PowerShell 7 (cross-platform)
+            ps_label: PS7
+
+    # Apply the matrix shell to every run step so it doesn't have to be
+    # repeated on each step (and avoids expression-in-shell linting errors).
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Pester
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module -Name Pester -MinimumVersion 5.0.0 -Force -Scope CurrentUser -SkipPublisherCheck
+
+      - name: Create coverage directory
+        run: New-Item -ItemType Directory -Force -Path coverage | Out-Null
+
+      # Run tests with code coverage using New-PesterConfiguration (Pester v5 recommended approach).
+      # Matrix label is expanded by Actions before the shell sees the script, so it is safe to use
+      # ${{ matrix.ps_label }} inside the run block to produce per-version output file names.
+      - name: Run Pester tests with code coverage
+        env:
+          TEST_MODE: "1"
+        run: |
+          # Explicitly set $ErrorActionPreference = 'Stop' — GitHub Actions sets this
+          # by default for every powershell step, but being explicit here makes the
+          # behaviour self-documenting and allows the same command to be run locally
+          # to reproduce CI behaviour exactly.
+          $ErrorActionPreference = 'Stop'
+
+          $config = New-PesterConfiguration
+
+          # Test execution
+          $config.Run.Path     = ".\tests"
+          $config.Run.PassThru = $true
+
+          # Code coverage — scoped to the single production script
+          $config.CodeCoverage.Enabled      = $true
+          $config.CodeCoverage.Path         = ".\entra-id-pre-provision-onespan-fx7.ps1"
+          $config.CodeCoverage.OutputFormat = "JaCoCo"
+          $config.CodeCoverage.OutputPath   = "coverage\coverage-${{ matrix.ps_label }}.xml"
+
+          # Test result report (JUnit XML consumed by dorny/test-reporter)
+          $config.TestResult.Enabled      = $true
+          $config.TestResult.OutputFormat = "JUnitXml"
+          $config.TestResult.OutputPath   = "test-results-${{ matrix.ps_label }}.xml"
+
+          $config.Output.Verbosity = "Normal"
+
+          $results = Invoke-Pester -Configuration $config
+
+          if ($results.FailedCount -gt 0) {
+            Write-Error "Pester: $($results.FailedCount) test(s) failed." -ErrorAction Continue
+            exit 1
+          }
+
+          # Enforce coverage threshold directly from Pester's result object.
+          $warnThreshold = 70
+          $failThreshold = 90
+          $pct     = [Math]::Round($results.CodeCoverage.CoveragePercent, 2)
+          $covered = $results.CodeCoverage.CommandsExecutedCount
+          $total   = $results.CodeCoverage.CommandsAnalyzedCount
+
+          $indicator = if ($pct -ge $failThreshold) { "PASS" } elseif ($pct -ge $warnThreshold) { "WARN" } else { "FAIL" }
+
+          # Build the job summary using UTF-8 without BOM (PS5.1 Out-File -Encoding utf8 adds BOM
+          # which corrupts emoji in GitHub's summary renderer). AppendAllText uses no-BOM UTF-8.
+          $utf8 = [System.Text.Encoding]::UTF8
+          $nl = "`n"
+          [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "## [$indicator] Coverage (${{ matrix.ps_label }}): $pct% ($covered / $total commands)$nl", $utf8)
+          [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "$nl| Line | Uncovered command |$nl|-----:|-------------------|$nl", $utf8)
+
+          $results.CodeCoverage.CommandsMissed | Sort-Object Line | ForEach-Object {
+            # Command text can be multi-line (e.g. a full if-block). Keep only the first
+            # line and trim indentation so the markdown table cell doesn't break.
+            $cmd = ($_.Command -split '\r?\n')[0].Trim() -replace '\|', '\|'
+            [System.IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, "| $($_.Line) | $cmd |$nl", $utf8)
+          }
+
+          if ($pct -lt $failThreshold) {
+            Write-Error "Coverage $pct% is below the required $failThreshold% threshold." -ErrorAction Continue
+            exit 1
+          }
+
+          if ($pct -lt $warnThreshold) {
+            Write-Warning "Coverage $pct% is below the warning threshold of $warnThreshold%."
+          }
+
+      # Publish test results to the Checks tab on the PR / commit
+      - name: Publish test results
+        uses: dorny/test-reporter@v3
+        if: always()
+        with:
+          name: Pester Test Results (${{ matrix.ps_label }})
+          path: test-results-${{ matrix.ps_label }}.xml
+          reporter: java-junit
+
+      # Upload per-version coverage and test results as separate artifacts
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: pester-test-artifacts-${{ matrix.ps_label }}
+          path: |
+            coverage/coverage-${{ matrix.ps_label }}.xml
+            test-results-${{ matrix.ps_label }}.xml
+          retention-days: 30
