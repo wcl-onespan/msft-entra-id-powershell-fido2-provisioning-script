@@ -74,5 +74,3 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Bulk registration via `-CsvFilePath` (CSV format: `UPN,SerialID`).
 - Interactive prompts for any missing parameter values.
 - `DisplayName` automatically set to `OneSpan FX7 {SerialID}`.
-
-

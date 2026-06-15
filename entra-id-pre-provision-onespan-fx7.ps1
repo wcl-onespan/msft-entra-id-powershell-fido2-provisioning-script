@@ -42,6 +42,16 @@
     Override for the passkey display name. Defaults to "OneSpan FX7 {SerialID}" (with hyphens stripped).
     Rarely needed; the default matches the display name used for verification and duplicate detection.
 
+.PARAMETER LogPath
+    Optional path to a log file. When set, Write-Log appends a timestamped entry for every message.
+
+.PARAMETER DryRun
+    When set, Confirm-Action is bypassed and a warning is emitted instead of prompting. Use this flag
+    to validate connectivity and policy checks without modifying any Entra ID credentials.
+
+.PARAMETER Force
+    Suppresses the interactive confirmation prompt before processing. Useful for unattended automation.
+
 .EXAMPLE
     # Single-user registration
     .\entra-id-pre-provision-onespan-fx7.ps1 -TenantId "contoso.onmicrosoft.com" -UPN "user@contoso.com" -SerialID "FX7-12345678"
@@ -78,8 +88,43 @@ param (
 
     [string]$SerialID, # Serial number of the OneSpan FX device being assigned to the user.
 
-    [string]$DisplayName = "OneSpan FX7 $SerialID"
+    [string]$DisplayName = "OneSpan FX7 $SerialID",
+
+    [string]$LogPath,
+
+    [switch]$DryRun,
+
+    [switch]$Force
 )
+
+# PS version override for unit-test isolation. Set $script:PSVersionOverride = 5 or 7 in a
+# BeforeEach block to force a specific code path in Ensure-Module without needing to actually
+# run under that PS version.
+$script:PSVersionOverride = $null
+
+# Centralised logging. Routes to the appropriate output stream and optionally appends a
+# timestamped line to a log file whenever $script:LogPath is set (populated inside Main).
+function Write-Log {
+    param (
+        [Parameter(Mandatory = $true)][string]$Message,
+        [Parameter(Mandatory = $false)][string]$ForegroundColor,
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Host', 'Error', 'Warn', 'Verbose')]
+        [string]$Level = 'Verbose'
+    )
+    switch ($Level) {
+        'Host' {
+            if ($ForegroundColor) { Write-Host $Message -ForegroundColor $ForegroundColor }
+            else                  { Write-Host $Message }
+        }
+        'Error'   { Write-Error $Message -ErrorAction Continue }
+        'Warn'    { Write-Warning $Message }
+        default   { Write-Verbose $Message }
+    }
+    if ($script:LogPath) {
+        Add-Content -Path $script:LogPath -Value "$(Get-Date -Format 'MM/dd/yyyy HH:mm:ss.fff'): [$Level] $Message"
+    }
+}
 
 function Ensure-Module {
     param (
@@ -88,7 +133,19 @@ function Ensure-Module {
     )
     $installed = Get-Module -Name $ModuleName -ListAvailable | Sort-Object Version -Descending | Select-Object -First 1
     if (-not $installed -or ($MinimumVersion -and $installed.Version -lt $MinimumVersion)) {
-        Install-Module -Name $ModuleName -Scope CurrentUser -Force -ErrorAction Stop
+        # Install-PSResource (PS 7+) is the modern replacement for the deprecated Install-Module.
+        # Windows PowerShell 5.1 does not ship Install-PSResource, so use Install-Module there.
+        $psMajor = if ($null -ne $script:PSVersionOverride) { $script:PSVersionOverride } else { $PSVersionTable.PSVersion.Major }
+        if ($psMajor -lt 7) {
+            Install-Module -Name $ModuleName -Scope CurrentUser -Force -MinimumVersion $MinimumVersion -ErrorAction Stop
+        } else {
+            $versionArg = if ($MinimumVersion) { "[$MinimumVersion,)" } else { $null }
+            if ($versionArg) {
+                Install-PSResource -Name $ModuleName -Scope CurrentUser -Version $versionArg -ErrorAction Stop
+            } else {
+                Install-PSResource -Name $ModuleName -Scope CurrentUser -ErrorAction Stop
+            }
+        }
     }
 }
 
@@ -105,6 +162,29 @@ function Connect-ToMsGraph {
         Write-Error "Failed to connect to Microsoft Graph: $_" -ErrorAction Continue
         throw
     }
+}
+
+# Prompts the user for confirmation before a destructive operation unless -Force or -DryRun
+# are set. Returns $true when the user confirms (or when skipped). Throws if the user declines.
+function Confirm-Action {
+    param (
+        [string]$Message,
+        [switch]$Force,
+        [switch]$DryRun
+    )
+    if ($Force) {
+        Write-Verbose "Force flag set - skipping confirmation prompt."
+        return $true
+    }
+    if ($DryRun) {
+        Write-Warning "DryRun flag set - no changes will be made to Entra ID."
+        return $true
+    }
+    $answer = Read-Host "$Message (Y/N)"
+    if ($answer -notin @('Y', 'y')) {
+        throw "Operation cancelled by user."
+    }
+    return $true
 }
 
 # Fetches all FIDO2 authenticator AAGUIDs for a given vendor from the FIDO Alliance MDS3.
@@ -394,57 +474,85 @@ function Process-User {
     }
 }
 
-# DSInternals.Passkeys uses the Windows WebAuthn API (webauthn.dll), which is only
-# available on Windows. Fail fast with a clear message rather than a cryptic error
-# inside New-Passkey. PS 5.1 is always Windows so no check is needed there.
-if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
-    throw "This script requires Windows. DSInternals.Passkeys relies on the Windows WebAuthn API (webauthn.dll), which is not available on Linux or macOS."
-}
+# Wraps the main execution logic so the script can be dot-sourced (for Pester tests or
+# module reuse) without immediately running against a live tenant.
+function Main {
+    param (
+        [string]$TenantId,
+        [string]$UPN,
+        [string]$SerialID,
+        [string]$CsvFilePath,
+        [string]$DisplayName,
+        [string]$LogPath,
+        [switch]$DryRun,
+        [switch]$Force
+    )
 
-Ensure-Module -ModuleName "Microsoft.Graph.Identity.SignIns" -MinimumVersion "2.26.0"
-Ensure-Module -ModuleName "DSInternals.Passkeys" -MinimumVersion "3.1.0"
+    # Store LogPath in script scope so Write-Log can append to the log file from any function.
+    $script:LogPath = $LogPath
 
-if (-not $TenantId) {
-    $TenantId = Read-Host "Enter Tenant ID"
-}
-
-Connect-ToMsGraph -TenantId $TenantId
-Assert-Fido2PolicyEnabled
-
-if (-not $CsvFilePath -and (-not $UPN -or -not $SerialID)) {
-    $CsvFilePath = Read-Host "Enter CSV file path (leave blank if not using CSV)"
-}
-
-if ($CsvFilePath) {
-    $csvData = Import-Csv -Path $CsvFilePath
-    if (-not $csvData) {
-        Write-Error "The CSV file is empty. Please provide a valid CSV file." -ErrorAction Continue
-        throw "The CSV file is empty. Please provide a CSV with at least one data row."
+    # DSInternals.Passkeys uses the Windows WebAuthn API (webauthn.dll), which is only
+    # available on Windows. Fail fast with a clear message rather than a cryptic error
+    # inside New-Passkey. PS 5.1 is always Windows so no check is needed there.
+    if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+        throw "This script requires Windows. DSInternals.Passkeys relies on the Windows WebAuthn API (webauthn.dll), which is not available on Linux or macOS."
     }
-    if ($csvData -is [array]) {
-        $totalEntries = $csvData.Count
-    } else {
-        $totalEntries = 1
-        $csvData = @($csvData)
+
+    Ensure-Module -ModuleName "Microsoft.Graph.Identity.SignIns" -MinimumVersion "2.26.0"
+    Ensure-Module -ModuleName "DSInternals.Passkeys" -MinimumVersion "3.1.0"
+
+    if (-not $TenantId) {
+        $TenantId = Read-Host "Enter Tenant ID"
     }
-    $currentEntry = 0
-    foreach ($row in $csvData) {
-        $currentEntry++
-        Write-Host "Processing user $($row.UPN) with OneSpan FX7 serial number $($row.SerialID) ($currentEntry of $totalEntries)..."
-        try {
-            Process-User -UPN $row.UPN -SerialID $row.SerialID -DisplayName $DisplayName
-        } catch {
-            # -ErrorAction Continue keeps the batch running; a single user failure must
-            # not abort the remaining CSV rows (same reason as Verify-Registration above).
-            Write-Error "Error processing user $($row.UPN) with serial number $($row.SerialID): $_" -ErrorAction Continue
+
+    Connect-ToMsGraph -TenantId $TenantId
+    Assert-Fido2PolicyEnabled
+
+    Confirm-Action -Message "This will register FIDO2 passkeys for the specified user(s). Continue?" -Force:$Force -DryRun:$DryRun
+
+    if (-not $CsvFilePath -and (-not $UPN -or -not $SerialID)) {
+        $CsvFilePath = Read-Host "Enter CSV file path (leave blank if not using CSV)"
+    }
+
+    if ($CsvFilePath) {
+        $csvData = Import-Csv -Path $CsvFilePath
+        if (-not $csvData) {
+            Write-Error "The CSV file is empty. Please provide a valid CSV file." -ErrorAction Continue
+            throw "The CSV file is empty. Please provide a CSV with at least one data row."
         }
+        if ($csvData -is [array]) {
+            $totalEntries = $csvData.Count
+        } else {
+            $totalEntries = 1
+            $csvData = @($csvData)
+        }
+        $currentEntry = 0
+        foreach ($row in $csvData) {
+            $currentEntry++
+            Write-Log "Processing user $($row.UPN) with OneSpan FX7 serial number $($row.SerialID) ($currentEntry of $totalEntries)..." -Level Host
+            try {
+                Process-User -UPN $row.UPN -SerialID $row.SerialID -DisplayName $DisplayName
+            } catch {
+                # -ErrorAction Continue keeps the batch running; a single user failure must
+                # not abort the remaining CSV rows.
+                Write-Error "Error processing user $($row.UPN) with serial number $($row.SerialID): $_" -ErrorAction Continue
+            }
+        }
+    } else {
+        if (-not $UPN) {
+            $UPN = Read-Host "Enter User Principal Name (UPN)"
+        }
+        if (-not $SerialID) {
+            $SerialID = Read-Host "Enter Serial ID"
+        }
+        Process-User -UPN $UPN -SerialID $SerialID -DisplayName $DisplayName
     }
-} else {
-    if (-not $UPN) {
-        $UPN = Read-Host "Enter User Principal Name (UPN)"
-    }
-    if (-not $SerialID) {
-        $SerialID = Read-Host "Enter Serial ID"
-    }
-    Process-User -UPN $UPN -SerialID $SerialID -DisplayName $DisplayName
+}
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+# Main is not called when the script is dot-sourced (InvocationName == '.') — this
+# is the Pester test path. TEST_MODE=1 provides an additional guard for CI environments.
+if (-not $env:TEST_MODE -and $MyInvocation.InvocationName -ne '.') {
+    Main -TenantId $TenantId -UPN $UPN -SerialID $SerialID -CsvFilePath $CsvFilePath `
+         -DisplayName $DisplayName -LogPath $LogPath -DryRun:$DryRun -Force:$Force
 }

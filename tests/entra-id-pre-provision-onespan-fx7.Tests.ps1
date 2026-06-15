@@ -62,8 +62,12 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
         if (-not (Get-Command New-Passkey -ErrorAction SilentlyContinue)) {
             function global:New-Passkey { param() }
         }
+        if (-not (Get-Command Install-PSResource -ErrorAction SilentlyContinue)) {
+            function global:Install-PSResource { param([string]$Name, [string]$Scope, [string]$Version) }
+        }
 
-        Mock Install-Module  { }
+        Mock Install-Module    { }
+        Mock Install-PSResource { }
         Mock Connect-MgGraph { }
         Mock Invoke-MgGraphRequest {
             [PSCustomObject]@{
@@ -99,9 +103,9 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
 
         It 'Defines all expected functions' {
             $expected = @(
-                'Ensure-Module', 'Connect-ToMsGraph', 'Get-FidoMdsAAGUIDs',
-                'ConvertTo-Base64Url', 'Create-and-Register-Passkey',
-                'Assert-Fido2PolicyEnabled', 'Verify-Registration', 'Process-User'
+                'Write-Log', 'Ensure-Module', 'Connect-ToMsGraph', 'Confirm-Action',
+                'Get-FidoMdsAAGUIDs', 'ConvertTo-Base64Url', 'Create-and-Register-Passkey',
+                'Assert-Fido2PolicyEnabled', 'Verify-Registration', 'Process-User', 'Main'
             )
             foreach ($fn in $expected) {
                 Get-Command -Name $fn -ErrorAction SilentlyContinue |
@@ -191,6 +195,91 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
                     Should -Not -Throw
                 Should -Invoke Install-Module -Times 0
             }
+        }
+
+        Context 'Module not installed, PS7+ path (uses Install-PSResource)' {
+            BeforeEach {
+                Mock Get-Module { $null }
+                Mock Install-PSResource { }
+                $script:PSVersionOverride = 7
+            }
+            AfterEach { $script:PSVersionOverride = $null }
+            It 'Calls Install-PSResource with NuGet version range and does not call Install-Module' {
+                Ensure-Module -ModuleName 'DSInternals.Passkeys' -MinimumVersion '3.1.0'
+                Should -Invoke Install-PSResource -Times 1 -ParameterFilter {
+                    $Version -eq '[3.1.0,)'
+                }
+                Should -Invoke Install-Module -Times 0
+            }
+        }
+    }
+
+    # ══════════════════════════════════════════════════════════════════════════
+    Describe 'Write-Log' {
+
+        It 'Routes Level Host to Write-Host' {
+            Mock Write-Host { }
+            Write-Log -Message 'hello' -Level Host
+            Should -Invoke Write-Host -Times 1 -ParameterFilter { $Object -eq 'hello' }
+        }
+
+        It 'Routes Level Host with ForegroundColor to Write-Host -ForegroundColor' {
+            Mock Write-Host { }
+            Write-Log -Message 'colored' -Level Host -ForegroundColor Green
+            Should -Invoke Write-Host -Times 1 -ParameterFilter { $ForegroundColor -eq 'Green' }
+        }
+
+        It 'Routes Level Error to Write-Error' {
+            Mock Write-Error { }
+            Write-Log -Message 'err' -Level Error
+            Should -Invoke Write-Error -Times 1 -ParameterFilter { $Message -eq 'err' }
+        }
+
+        It 'Routes Level Warn to Write-Warning' {
+            Mock Write-Warning { }
+            Write-Log -Message 'warn' -Level Warn
+            Should -Invoke Write-Warning -Times 1 -ParameterFilter { $Message -eq 'warn' }
+        }
+
+        It 'Appends a timestamped line to the log file when LogPath is set' {
+            $script:LogPath = 'C:\fake-path\test.log'
+            Mock Add-Content { }
+            Write-Log -Message 'file test' -Level Host
+            Should -Invoke Add-Content -Times 1 -ParameterFilter { $Path -like '*test.log' }
+            $script:LogPath = $null
+        }
+
+        It 'Does not call Add-Content when LogPath is not set' {
+            $script:LogPath = $null
+            Mock Add-Content { throw 'Must not write to log' }
+            { Write-Log -Message 'no file' -Level Host } | Should -Not -Throw
+        }
+    }
+
+    # ══════════════════════════════════════════════════════════════════════════
+    Describe 'Confirm-Action' {
+
+        It 'Returns true immediately when -Force is set' {
+            Mock Read-Host { throw 'Must not prompt when Force is set' }
+            $result = Confirm-Action -Message 'Proceed?' -Force
+            $result | Should -Be $true
+        }
+
+        It 'Returns true immediately when -DryRun is set' {
+            Mock Read-Host { throw 'Must not prompt when DryRun is set' }
+            $result = Confirm-Action -Message 'Proceed?' -DryRun
+            $result | Should -Be $true
+        }
+
+        It 'Prompts and returns true when user answers Y' {
+            Mock Read-Host { 'Y' }
+            $result = Confirm-Action -Message 'Proceed?'
+            $result | Should -Be $true
+        }
+
+        It 'Prompts and throws when user answers N' {
+            Mock Read-Host { 'N' }
+            { Confirm-Action -Message 'Proceed?' } | Should -Throw
         }
     }
 
@@ -1110,9 +1199,10 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
 
     # ══════════════════════════════════════════════════════════════════════════
     Describe 'Main script body – CSV mode' {
-        # These tests dot-source the script with -CsvFilePath to exercise the CSV
-        # branch of the main script body (Import-Csv, the batch loop, error catching).
-        # All external calls are mocked; an actual temp file is used for Import-Csv.
+        # These tests call Main with -Force and -CsvFilePath to exercise the CSV
+        # branch (Import-Csv, the batch loop, error catching). -Force bypasses the
+        # Confirm-Action prompt. All external calls are mocked; an actual temp file
+        # is used for Import-Csv.
 
         It 'Processes a two-row CSV without throwing' {
             $csv = (New-TemporaryFile).FullName
@@ -1126,7 +1216,7 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
             Mock Write-Host  { }
             Mock Write-Error { }
             try {
-                { . $script:ScriptPath -TenantId 'test.onmicrosoft.com' -CsvFilePath $csv } |
+                { Main -TenantId 'test.onmicrosoft.com' -CsvFilePath $csv -Force } |
                     Should -Not -Throw
             } finally { Remove-Item $csv -Force -ErrorAction SilentlyContinue }
         }
@@ -1140,7 +1230,7 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
             Mock Write-Host  { }
             Mock Write-Error { }
             try {
-                { . $script:ScriptPath -TenantId 'test.onmicrosoft.com' -CsvFilePath $csv } |
+                { Main -TenantId 'test.onmicrosoft.com' -CsvFilePath $csv -Force } |
                     Should -Not -Throw
             } finally { Remove-Item $csv -Force -ErrorAction SilentlyContinue }
         }
@@ -1153,9 +1243,9 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
             $script:batchErrorFired = $false
             Mock Write-Error { $script:batchErrorFired = $true }
             try {
-                # The per-row catch calls Write-Error -ErrorAction Continue; the dot-source
+                # The per-row catch calls Write-Error -ErrorAction Continue; Main
                 # must complete (not terminate) even though an individual row failed.
-                { . $script:ScriptPath -TenantId 'test.onmicrosoft.com' -CsvFilePath $csv } |
+                { Main -TenantId 'test.onmicrosoft.com' -CsvFilePath $csv -Force } |
                     Should -Not -Throw
                 $script:batchErrorFired | Should -Be $true
             } finally {
@@ -1173,7 +1263,7 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
             Mock Write-Error { }
             Mock Write-Host  { }
             try {
-                { . $script:ScriptPath -TenantId 'test.onmicrosoft.com' -CsvFilePath $csv } |
+                { Main -TenantId 'test.onmicrosoft.com' -CsvFilePath $csv -Force } |
                     Should -Throw
                 Should -Invoke Write-Error -Times 1 -ParameterFilter {
                     $Message -match 'empty'
@@ -1184,8 +1274,8 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
 
     # ══════════════════════════════════════════════════════════════════════════
     Describe 'Main script body – interactive prompts' {
-        # These tests dot-source the script with deliberate parameter omissions to
-        # exercise the Read-Host branches (lines 348, 355, 384, 387).
+        # These tests call Main with deliberate parameter omissions to exercise the
+        # Read-Host prompt branches. -Force is passed to bypass Confirm-Action.
         # Get-MgBetaUserAuthenticationFido2Method is overridden per-test to return a
         # pre-registered key so Process-User takes the "already registered" path.
 
@@ -1199,7 +1289,7 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
             # Use a direct try/catch rather than { } | Should -Not -Throw so that
             # Should -Invoke on the next line doesn't receive pipeline input.
             $threw = $false
-            try { . $script:ScriptPath -UPN 'prompt@test.com' -SerialID '111111' } catch { $threw = $true }
+            try { Main -UPN 'prompt@test.com' -SerialID '111111' -Force } catch { $threw = $true }
             $threw | Should -Be $false -Because 'script should complete when TenantId is supplied via Read-Host'
         }
 
@@ -1225,7 +1315,7 @@ Describe 'entra-id-pre-provision-onespan-fx7.ps1' {
             }
             Mock Write-Host { }
             $threw = $false
-            try { . $script:ScriptPath -TenantId 'test.onmicrosoft.com' } catch { $threw = $true }
+            try { Main -TenantId 'test.onmicrosoft.com' -Force } catch { $threw = $true }
             $threw | Should -Be $false -Because 'script should complete when UPN and SerialID are supplied via Read-Host'
             $script:promptCallCount | Should -BeGreaterOrEqual 3 -Because 'all three Read-Host prompts must fire'
             $script:promptCallCount = $null
